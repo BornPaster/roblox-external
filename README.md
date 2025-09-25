@@ -12,9 +12,9 @@
     a simple yet good roblox external base made in python.
     <br />
     <br />
-    <a href="https://github.com/BornPaster/bruce/roblox-external">Report Bug</a>
+    <a href="https://github.com/BornPaster/roblox-external/issues">Report Bug</a>
     ·
-    <a href="https://github.com/BornPaster/bruce/roblox-external">Request Feature</a>
+    <a href="https://github.com/BornPaster/roblox-external/issues">Request Feature</a>
   </p>
 </div>
 
