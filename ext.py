@@ -7,12 +7,13 @@ import win32gui
 import win32con
 import traceback
 import win32process
+import requests
 
 from ctypes import wintypes
 
-
-with open('offsets.json', 'r') as f:
-    OFFSETS = json.load(f)
+OFFSETS_URL = "https://robloxoffsets.com/offsets.json"
+resp = requests.get(OFFSETS_URL)
+OFFSETS = resp.json()
 
 
 class PROCESSENTRY32(ctypes.Structure):
@@ -54,61 +55,12 @@ class vec3:
         self.y = y
         self.z = z
 
+
 class robloxmemory:
     def __init__(self):
-        self.process_handle = None
-        self.process_id = None
-        self.base_address = None
-        self.data_model = None
-        self.players = None
-        self.local_player = None
-        self.workspace = None
-        self.camera = None
-        self.visual_engine = None
-        self.fake_data_model = None
-        self.data_model_pointer = None
-        self.hwnd = None
-        self.cache = {}
-        self.cache_timeout = 0.5
-        self.last_cache_clear = time.time()
-        self.cache_hits = 0
-        self.cache_misses = 0
-        self.kernel32 = ctypes.windll.kernel32
-        self.locked_target = None
         if not self.find_roblox_process():
             raise Exception("failed to find roblox process.")
         self.initialize_game_data()
-
-    def get_cached(self, key, timeout=None):
-        if timeout is None:
-            timeout = self.cache_timeout
-        if key in self.cache:
-            value, timestamp = self.cache[key]
-            if time.time() - timestamp < timeout:
-                self.cache_hits += 1
-                return value
-            else:
-                del self.cache[key]
-                self.cache_misses += 1
-        else:
-            self.cache_misses += 1
-        return None
-
-    def set_cached(self, key, value):
-        self.cache[key] = (value, time.time())
-        current_time = time.time()
-        if current_time - self.last_cache_clear > 2.0:
-            self.clear_expired_cache()
-            self.last_cache_clear = current_time
-
-    def clear_expired_cache(self):
-        current_time = time.time()
-        expired_keys = []
-        for key, (value, timestamp) in self.cache.items():
-            if current_time - timestamp > self.cache_timeout:
-                expired_keys.append(key)
-        for key in expired_keys:
-            del self.cache[key]
 
     def find_roblox_process(self):
         hwnd, pid = self.find_window_by_exe("RobloxPlayerBeta.exe")
@@ -122,12 +74,12 @@ class robloxmemory:
             self.process_id = pid
             hwnd, _ = self.find_window_by_exe("RobloxPlayerBeta.exe")
             self.hwnd = hwnd if hwnd else None
-        self.process_handle = self.kernel32.OpenProcess(win32con.PROCESS_ALL_ACCESS, False, self.process_id)
+        self.process_handle = ctypes.windll.kernel32.OpenProcess(win32con.PROCESS_ALL_ACCESS, False, self.process_id)
         if not self.process_handle:
             return False
         self.base_address = self.get_module_address("RobloxPlayerBeta.exe")
         if not self.base_address:
-            self.kernel32.CloseHandle(self.process_handle)
+            ctypes.windll.kernel32.CloseHandle(self.process_handle)
             return False
         return True
 
@@ -173,31 +125,31 @@ class robloxmemory:
             return None
 
     def get_module_address(self, module_name):
-        if not self.process_handle:
+        if not getattr(self, 'process_handle', None):
             return None
-        snapshot = self.kernel32.CreateToolhelp32Snapshot(0x8 | 0x10, self.process_id)
+        snapshot = ctypes.windll.kernel32.CreateToolhelp32Snapshot(0x8 | 0x10, self.process_id)
         if snapshot == -1:
             return None
         module_entry = MODULEENTRY32()
         module_entry.dwSize = ctypes.sizeof(MODULEENTRY32)
-        if self.kernel32.Module32First(snapshot, ctypes.byref(module_entry)):
+        if ctypes.windll.kernel32.Module32First(snapshot, ctypes.byref(module_entry)):
             while True:
                 try:
                     name = module_entry.szModule.decode().lower()
                 except Exception:
                     name = ""
                 if module_name.lower() == name:
-                    self.kernel32.CloseHandle(snapshot)
+                    ctypes.windll.kernel32.CloseHandle(snapshot)
                     return ctypes.addressof(module_entry.modBaseAddr.contents)
-                if not self.kernel32.Module32Next(snapshot, ctypes.byref(module_entry)):
+                if not ctypes.windll.kernel32.Module32Next(snapshot, ctypes.byref(module_entry)):
                     break
-        self.kernel32.CloseHandle(snapshot)
+        ctypes.windll.kernel32.CloseHandle(snapshot)
         return None
 
     def read_memory(self, address, size):
         buffer = ctypes.create_string_buffer(size)
         bytes_read = ctypes.c_size_t()
-        result = self.kernel32.ReadProcessMemory(self.process_handle, ctypes.c_void_p(address), buffer, size, ctypes.byref(bytes_read))
+        result = ctypes.windll.kernel32.ReadProcessMemory(self.process_handle, ctypes.c_void_p(address), buffer, size, ctypes.byref(bytes_read))
         if result and bytes_read.value > 0:
             return buffer.raw[:bytes_read.value]
         return None
@@ -251,29 +203,27 @@ class robloxmemory:
 
     def initialize_game_data(self):
         try:
-            self.fake_data_model = self.read_ptr(self.base_address + int(OFFSETS["FakeDataModelPointer"], 16))
-            if not self.fake_data_model or self.fake_data_model == 0xFFFFFFFF:
-                self.fake_data_model = None
+            fake_data_model = self.read_ptr(self.base_address + int(OFFSETS["FakeDataModelPointer"], 16))
+            if not fake_data_model or fake_data_model == 0xFFFFFFFF:
                 return
-            self.data_model_pointer = self.read_ptr(self.fake_data_model + int(OFFSETS["FakeDataModelToDataModel"], 16))
-            if not self.data_model_pointer or self.data_model_pointer == 0xFFFFFFFF:
-                self.data_model_pointer = None
+            data_model_pointer = self.read_ptr(fake_data_model + int(OFFSETS["FakeDataModelToDataModel"], 16))
+            if not data_model_pointer or data_model_pointer == 0xFFFFFFFF:
                 return
             retry_count = 0
             data_model_name = ""
             while retry_count < 30:
-                name_ptr = self.read_ptr(self.data_model_pointer + int(OFFSETS["Name"], 16)) if self.data_model_pointer else None
+                name_ptr = self.read_ptr(data_model_pointer + int(OFFSETS["Name"], 16)) if data_model_pointer else None
                 data_model_name = self.read_string(name_ptr) if name_ptr else ""
                 if data_model_name == "Ugc":
                     break
                 time.sleep(1)
                 retry_count += 1
-                self.fake_data_model = self.read_ptr(self.base_address + int(OFFSETS["FakeDataModelPointer"], 16))
-                if self.fake_data_model:
-                    self.data_model_pointer = self.read_ptr(self.fake_data_model + int(OFFSETS["FakeDataModelToDataModel"], 16))
+                fake_data_model = self.read_ptr(self.base_address + int(OFFSETS["FakeDataModelPointer"], 16))
+                if fake_data_model:
+                    data_model_pointer = self.read_ptr(fake_data_model + int(OFFSETS["FakeDataModelToDataModel"], 16))
             if data_model_name != "Ugc":
                 return
-            self.data_model = self.data_model_pointer
+            self.data_model = data_model_pointer
             self.visual_engine = self.read_ptr(self.base_address + int(OFFSETS["VisualEnginePointer"], 16))
             if not self.visual_engine or self.visual_engine == 0xFFFFFFFF:
                 self.visual_engine = None
@@ -296,17 +246,11 @@ class robloxmemory:
             pass
 
     def get_children(self, parent_address):
-        cache_key = f"children_{parent_address}"
-        cached = self.get_cached(cache_key)
-        if cached is not None:
-            return cached
         children = []
         if not parent_address:
-            self.set_cached(cache_key, children)
             return children
         children_ptr = self.read_ptr(parent_address + int(OFFSETS["Children"], 16))
         if not children_ptr:
-            self.set_cached(cache_key, children)
             return children
         children_end = self.read_ptr(children_ptr + int(OFFSETS["ChildrenEnd"], 16))
         current_child = self.read_ptr(children_ptr)
@@ -315,60 +259,35 @@ class robloxmemory:
             if child_ptr:
                 children.append(child_ptr)
             current_child += 0x10
-        self.set_cached(cache_key, children)
         return children
 
     def get_instance_name(self, address):
         if not address:
             return ""
-        cache_key = f"name_{address}"
-        cached = self.get_cached(cache_key, 0.1)
-        if cached is not None:
-            return cached
         name_ptr = self.read_ptr(address + int(OFFSETS["Name"], 16))
-        name = self.read_string(name_ptr) if name_ptr else ""
-        self.set_cached(cache_key, name)
-        return name
+        return self.read_string(name_ptr) if name_ptr else ""
 
     def get_instance_class(self, address):
         if not address:
             return ""
-        cache_key = f"class_{address}"
-        cached = self.get_cached(cache_key, 0.1)
-        if cached is not None:
-            return cached
         class_descriptor = self.read_ptr(address + int(OFFSETS["ClassDescriptor"], 16))
         if class_descriptor:
             class_name_ptr = self.read_ptr(class_descriptor + int(OFFSETS["ClassDescriptorToClassName"], 16))
-            class_name = self.read_string(class_name_ptr) if class_name_ptr else ""
-            self.set_cached(cache_key, class_name)
-            return class_name
+            return self.read_string(class_name_ptr) if class_name_ptr else ""
         return ""
 
     def find_first_child_which_is_a(self, parent_address, class_name):
-        cache_key = f"find_child_{parent_address}_{class_name}"
-        cached = self.get_cached(cache_key, 0.05)
-        if cached is not None:
-            return cached
         children = self.get_children(parent_address)
         for child in children:
             if self.get_instance_class(child) == class_name:
-                self.set_cached(cache_key, child)
                 return child
-        self.set_cached(cache_key, None)
         return None
 
     def find_first_child_by_name(self, parent_address, name):
-        cache_key = f"find_child_name_{parent_address}_{name}"
-        cached = self.get_cached(cache_key, 0.05)
-        if cached is not None:
-            return cached
         children = self.get_children(parent_address)
         for child in children:
             if self.get_instance_name(child) == name:
-                self.set_cached(cache_key, child)
                 return child
-        self.set_cached(cache_key, None)
         return None
 
     def read_matrix4(self, address):
@@ -389,7 +308,7 @@ class robloxmemory:
         return team_ptr
 
     def get_player_coordinates(self):
-        if not self.players or not self.local_player:
+        if not getattr(self, 'players', None) or not getattr(self, 'local_player', None):
             return []
         coordinates = []
         player_instances = self.get_children(self.players)
@@ -458,7 +377,7 @@ class robloxmemory:
         return coordinates
 
     def get_window_viewport(self):
-        if not self.hwnd:
+        if not getattr(self, 'hwnd', None):
             return vec2(1920, 1080)
         try:
             left, top, right, bottom = win32gui.GetClientRect(self.hwnd)
@@ -473,7 +392,7 @@ class robloxmemory:
             return vec2(1920, 1080)
 
     def world_to_screen(self, pos):
-        if not self.visual_engine:
+        if not getattr(self, 'visual_engine', None):
             return vec2(-1, -1)
         try:
             view_matrix = self.read_matrix4(self.visual_engine + int(OFFSETS["viewmatrix"], 16))
@@ -499,21 +418,13 @@ class robloxmemory:
             return vec2(-1, -1)
 
     def get_place_id(self):
-        if not self.data_model:
+        if not getattr(self, 'data_model', None):
             return None
-        cache_key = "place_id"
-        cached = self.get_cached(cache_key, 1.0)
-        if cached is not None:
-            return cached
         try:
             place_id = self.read_int64(self.data_model + int(OFFSETS["PlaceId"], 16))
-            if place_id:
-                self.set_cached(cache_key, place_id)
-                return place_id
+            return place_id if place_id else None
         except Exception:
-            pass
-        self.set_cached(cache_key, None)
-        return None
+            return None
 
     def print_game_info(self):
         player_coords = self.get_player_coordinates()
@@ -531,6 +442,7 @@ def main():
     except Exception as e:
         print(f"err : {e}")
         traceback.print_exc()
+
 
 if __name__ == "__main__":
     main()
